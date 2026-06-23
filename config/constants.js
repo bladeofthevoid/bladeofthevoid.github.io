@@ -108,7 +108,7 @@ module.exports = {
     // specific port without colliding with a world server on the same
     // machine. 9000 is the final fallback for plain local development.
     PORT: Number(process.env.PORT || process.env.GATEWAY_PORT) || 9000,
-    URL: process.env.GATEWAY_URL || `http://localhost:${Number(process.env.PORT || process.env.GATEWAY_PORT) || 9000}`,
+    URL: process.env.GATEWAY_URL || `https://blade-of-the-void-gateway-backend.onrender.com/`,
     // How often a world server pushes its population/health stats to the
     // gateway, and how long the gateway will tolerate silence before it
     // considers that server offline and stops assigning players to it.
