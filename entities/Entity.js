@@ -24,6 +24,14 @@ class Entity {
     this.id = id;
     this.type = type;
 
+    // Which isolated World this entity belongs to. Set by World.js when
+    // the entity is added (see World.addPlayer/spawnEntity). Entities
+    // never move between worlds, so this is set once and never mutated --
+    // it exists purely so a serialized entity packet is self-describing
+    // (a client that somehow received state for the wrong world, e.g.
+    // during a transfer race, can detect and discard it).
+    this.worldId = null;
+
     this.position = { x: 0, y: 0, z: 0 };
     this.velocity = { x: 0, y: 0, z: 0 };
     this.rotationY = 0; // facing, radians, rotation about the world Y axis
@@ -50,6 +58,7 @@ class Entity {
     return {
       id: this.id,
       type: this.type,
+      worldId: this.worldId,
       position: this.position,
       velocity: this.velocity,
       rotationY: this.rotationY,
