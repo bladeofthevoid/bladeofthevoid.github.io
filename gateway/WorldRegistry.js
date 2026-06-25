@@ -16,21 +16,86 @@
  * -----------------------------------------------------------------------
  */
 
+const https  = require('https');
+const http   = require('http');
+
 const Config = require('../config/constants');
+
+/**
+ * Fire-and-forget GET to `url`. Resolves true on any HTTP response,
+ * false on network error or timeout. Used only for keep-alive pings —
+ * we don't care about the response body, just that the server woke up.
+ */
+function ping(url) {
+  return new Promise((resolve) => {
+    const mod = url.startsWith('https') ? https : http;
+    try {
+      const req = mod.get(url, (res) => { res.resume(); resolve(true); });
+      req.setTimeout(12000, () => { req.destroy(); resolve(false); });
+      req.on('error', () => resolve(false));
+    } catch (_) { resolve(false); }
+  });
+}
 
 class WorldRegistry {
   constructor() {
     /** @type {Map<string, object>} serverId -> { serverId, adminUrl, wsUrl, maxWorlds, maxPlayers, maxEntities, supportedTypes, lastHeartbeatAt, worlds: [] } */
     this.servers = new Map();
 
-    this._sweepTimer = setInterval(
-      () => this._evictStaleServers(),
-      Config.GATEWAY.HEARTBEAT_INTERVAL_MS
+    /**
+     * Every admin URL we have ever seen, even from servers that have since
+     * been evicted. Kept so the keep-alive pinger can still reach them
+     * after a spin-down (the process died, so it can't heartbeat, but an
+     * HTTP GET to its admin URL will wake it back up).
+     * @type {Set<string>}
+     */
+    this.knownAdminUrls = new Set();
+
+    this._sweepTimer    = setInterval(() => this._evictStaleServers(), Config.GATEWAY.HEARTBEAT_INTERVAL_MS);
+    this._keepAliveTimer = null;
+  }
+
+  /**
+   * Start periodic pings to all known world-server admin URLs so Render's
+   * free-plan services never idle out.
+   *
+   * @param {string[]} initialUrls  Static list from GATEWAY env var —
+   *   used to prime the set before any server has self-registered.
+   * @param {number}   intervalMs   How often to ping (default 10 min).
+   */
+  startKeepAlive(initialUrls = [], intervalMs = Config.KEEP_ALIVE.PING_INTERVAL_MS) {
+    for (const url of initialUrls) {
+      if (url) this.knownAdminUrls.add(url);
+    }
+
+    // Ping immediately on gateway startup so world servers wake up as
+    // soon as the gateway itself comes back from a cold start.
+    setTimeout(() => this._pingAll(), 5_000);
+
+    this._keepAliveTimer = setInterval(() => this._pingAll(), intervalMs);
+    console.log(
+      `[gateway/keep-alive] pinging ${this.knownAdminUrls.size} known server(s) every ${intervalMs / 60000} min`
     );
+  }
+
+  /** Send a lightweight ping to every known admin URL. */
+  async _pingAll() {
+    if (this.knownAdminUrls.size === 0) return;
+    for (const adminUrl of this.knownAdminUrls) {
+      const target = `${adminUrl}/admin/status`;
+      ping(target).then((ok) => {
+        if (ok) console.log(`[gateway/keep-alive] ✓ ${adminUrl}`);
+        else    console.warn(`[gateway/keep-alive] ✗ unreachable: ${adminUrl}`);
+      });
+    }
   }
 
   /** Called when a world server starts up and announces itself. */
   registerServer(info) {
+    // Persist the admin URL so the keep-alive pinger can reach this server
+    // even if it goes idle and is later evicted from the live registry.
+    if (info.adminUrl) this.knownAdminUrls.add(info.adminUrl);
+
     const existing = this.servers.get(info.serverId);
     this.servers.set(info.serverId, {
       serverId: info.serverId,
@@ -150,6 +215,7 @@ class WorldRegistry {
 
   shutdown() {
     clearInterval(this._sweepTimer);
+    if (this._keepAliveTimer) clearInterval(this._keepAliveTimer);
   }
 }
 
