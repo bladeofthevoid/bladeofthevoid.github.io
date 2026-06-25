@@ -46,6 +46,12 @@ const INDEX_HTML_PATH = path.join(__dirname, '..', 'index.html');
 const registry = new WorldRegistry();
 const assignmentService = new AssignmentService(registry);
 
+// Keep world servers alive on Render's free plan: the gateway gets player
+// traffic so it self-wakes, but world servers need explicit pings.
+// Configure WORLD_SERVER_URLS on the gateway's Render env (comma-separated
+// list of world-server admin base URLs) — see config/constants.js for docs.
+registry.startKeepAlive(Config.KEEP_ALIVE.WORLD_SERVER_URLS);
+
 // -------------------------------------------------------------------------
 // HTTP: static index.html (the client's entry point, per the architecture
 // diagram CLIENT -> Gateway) + the registration/heartbeat API world
