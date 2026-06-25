@@ -119,6 +119,29 @@ module.exports = {
   // -----------------------------------------------------------------------
   // RELIABILITY
   // -----------------------------------------------------------------------
+  // -----------------------------------------------------------------------
+  // KEEP_ALIVE
+  // -----------------------------------------------------------------------
+  // Render's free plan spins services down after ~15 minutes of inactivity.
+  // The gateway receives player traffic so it self-wakes, but world servers
+  // only get traffic from players who have already been redirected to them —
+  // which never happens if they're asleep when the gateway tries to assign.
+  //
+  // Solution: the gateway periodically GETs each world server's
+  // /admin/status endpoint so they never go idle.
+  //
+  // Set WORLD_SERVER_URLS on the gateway's Render environment to a
+  // comma-separated list of world-server admin base URLs, e.g.:
+  //   https://my-world-server.onrender.com,https://my-world-server-2.onrender.com
+  KEEP_ALIVE: {
+    WORLD_SERVER_URLS: (process.env.WORLD_SERVER_URLS || '')
+      .split(',')
+      .map((u) => u.trim())
+      .filter(Boolean),
+    // Must be shorter than Render's 15-minute inactivity window.
+    PING_INTERVAL_MS: 10 * 60 * 1000,
+  },
+
   RELIABILITY: {
     // A connection that has sent nothing (not even a ping) in this long is
     // swept by WebSocketServer's stale-connection check, even if the
