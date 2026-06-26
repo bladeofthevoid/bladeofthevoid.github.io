@@ -132,6 +132,7 @@
 
 <script type="module">
 import * as THREE from 'three';
+import { PlayerController } from '/player/PlayerController.js';
 
 /* =========================================================================
  * SECTION: CONFIG
@@ -580,10 +581,28 @@ class CameraController {
   }
 
   /** @param {{x:number,y:number,z:number}} targetPosition - world position to orbit around */
-  update(targetPosition) {
+  update(targetPosition, velocity = null) {
     const offsetX = Math.sin(this.yaw) * Math.cos(this.pitch) * this.distance;
     const offsetY = Math.sin(this.pitch) * this.distance;
     const offsetZ = Math.cos(this.yaw) * Math.cos(this.pitch) * this.distance;
+
+    // Velocity anticipation: bias the look-at point slightly ahead of
+    // the player's movement so they can see where they are going.
+    // A short LERP prevents the camera from snapping when direction changes.
+    if (!this._anticipation) this._anticipation = { x: 0, z: 0 };
+    if (velocity) {
+      const spd    = Math.hypot(velocity.x, velocity.z);
+      const maxSpd = 6.0;   // matches server MAX_SPEED; minor if it drifts
+      const factor = Math.min(spd / maxSpd, 1.0) * 0.85;
+      const tx = spd > 0.05 ? (velocity.x / spd) * factor : 0;
+      const tz = spd > 0.05 ? (velocity.z / spd) * factor : 0;
+      this._anticipation.x += (tx - this._anticipation.x) * 0.08;
+      this._anticipation.z += (tz - this._anticipation.z) * 0.08;
+    } else {
+      // Decay smoothly back to centre when no velocity hint is provided
+      this._anticipation.x *= 0.92;
+      this._anticipation.z *= 0.92;
+    }
 
     const desired = new THREE.Vector3(
       targetPosition.x + offsetX,
@@ -592,7 +611,11 @@ class CameraController {
     );
 
     this.camera.position.lerp(desired, this.followLerp);
-    this.camera.lookAt(targetPosition.x, targetPosition.y + this.height * 0.6, targetPosition.z);
+    this.camera.lookAt(
+      targetPosition.x + this._anticipation.x,
+      targetPosition.y + this.height * 0.6,
+      targetPosition.z + this._anticipation.z
+    );
   }
 }
 
@@ -624,6 +647,9 @@ class EntityView {
     this._moveSpeed    = 0;      // smoothed per-frame movement speed
     this._walkPhase    = 0;      // walk-cycle phase accumulator (radians)
     this._lastAnimTime = null;   // timestamp of last _animateDeadStar call
+    // When true, an external Animator owns joint updates for this view
+    // (local player only). EntityView._animateDeadStar() is then skipped.
+    this._externalAnimator = false;
     scene.add(this.mesh);
   }
 
@@ -696,14 +722,25 @@ class EntityView {
     const C_JOINT = 0x221040;   // elbow / knee / shoulder joint caps
     const C_SHELL = 0x4a0f80;   // head outer shell: dark purple
     const C_CORE  = 0xd050ff;   // head inner core: bright purple
+    const C_GLOW  = 0xff90ff;   // head mid-glow halo: pink-purple
+    const C_RAY   = 0xb840ff;   // dead star spike rays
 
     // ── Materials ──────────────────────────────────────────────────────────
     const bodyMat  = new THREE.MeshLambertMaterial({ color: C_BODY  });
     const acntMat  = new THREE.MeshLambertMaterial({ color: C_ACNT  });
     const jointMat = new THREE.MeshLambertMaterial({ color: C_JOINT });
     const seamMat  = new THREE.LineBasicMaterial(  { color: C_SEAM  });
-    const shellMat = new THREE.MeshLambertMaterial({ color: C_SHELL, transparent: true, opacity: 0.68 });
+    const shellMat = new THREE.MeshLambertMaterial({ color: C_SHELL, transparent: true, opacity: 0.65 });
     const coreMat  = new THREE.MeshBasicMaterial(  { color: C_CORE  });
+    // Additive blending: adds colour to whatever is behind — free glow, no lights needed.
+    const glowMat  = new THREE.MeshBasicMaterial({
+      color: C_GLOW, transparent: true, opacity: 0.20,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const rayMat   = new THREE.MeshBasicMaterial({
+      color: C_RAY, transparent: true, opacity: 0.88,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
 
     // ── Helpers ────────────────────────────────────────────────────────────
     /** Attach a Mesh to a parent group at a local position. */
@@ -722,9 +759,35 @@ class EntityView {
       return g;
     };
 
-    // ── HEAD ───────────────────────────────────────────────────────────────
-    mk(new THREE.SphereGeometry(0.110, 14, 14), coreMat,  root, 0, 0.88, 0);  // glowing core
-    mk(new THREE.SphereGeometry(0.165, 18, 18), shellMat, root, 0, 0.88, 0);  // transparent shell
+    // ── HEAD — "Dead Star" ──────────────────────────────────────────────────
+    // Entire head lives in a Group so _animateDeadStar() can spin + wobble it
+    // without touching any other body part.  Raised to y = 0.98 to clear the
+    // neck with the larger shell radius.
+    const headGrp = grp(root, 0, 0.98, 0);
+
+    mk(new THREE.SphereGeometry(0.148, 10, 10), coreMat,  headGrp);  // bright inner core
+    mk(new THREE.SphereGeometry(0.210,  8,  8), glowMat,  headGrp);  // additive glow halo
+    mk(new THREE.SphereGeometry(0.282, 12, 12), shellMat, headGrp);  // transparent outer shell
+
+    // Six-axis spike rays — ±X, ±Y, ±Z — classic pulsar / dead-star silhouette.
+    // Each pivot is rotated so its local +Y points outward; the cone then sits
+    // at y = 0.43 along that axis, giving:
+    //   base  at 0.43 − 0.16 = 0.27  (≈ shell surface at r = 0.282)
+    //   apex  at 0.43 + 0.16 = 0.59  (extends 0.31 beyond the shell)
+    const rayGeo = new THREE.ConeGeometry(0.040, 0.32, 5);
+    const addRay = (rx, rz) => {
+      const pivot = new THREE.Group();
+      pivot.rotation.x = rx;
+      pivot.rotation.z = rz;
+      headGrp.add(pivot);
+      mk(rayGeo, rayMat, pivot, 0, 0.43, 0);
+    };
+    addRay(0,               0);          // +Y  top spike
+    addRay(Math.PI,         0);          // −Y  bottom (partly hidden by neck)
+    addRay(0,  -Math.PI / 2);           // +X  right
+    addRay(0,   Math.PI / 2);           // −X  left
+    addRay(-Math.PI / 2,    0);         // +Z  forward
+    addRay( Math.PI / 2,    0);         // −Z  backward
 
     // ── NECK ───────────────────────────────────────────────────────────────
     // Bottom (y = 0.66) sits flush on the chest top; top embeds in head sphere.
@@ -741,9 +804,8 @@ class EntityView {
     chestGrp.add(new THREE.LineSegments(new THREE.EdgesGeometry(chestGeo), seamMat));
 
     // ── SHOULDER CAPS ──────────────────────────────────────────────────────
-    // Visible ball-joint markers at the arm attachment points.
-    // These are THE humanoid read — the eye immediately sees "shoulders".
-    const sbGeo = new THREE.SphereGeometry(0.073, 8, 8);
+    // Larger to match the thicker upper arms.
+    const sbGeo = new THREE.SphereGeometry(0.096, 8, 8);
     mk(sbGeo, jointMat, root, -0.32, 0.60, 0);
     mk(sbGeo, jointMat, root,  0.32, 0.60, 0);
 
@@ -752,17 +814,22 @@ class EntityView {
     mk(new THREE.CylinderGeometry(0.120, 0.132, 0.16, 6), bodyMat, root, 0, 0.13, 0);
 
     // ── PELVIS ─────────────────────────────────────────────────────────────
-    mk(new THREE.CylinderGeometry(0.178, 0.178, 0.16, 6), bodyMat, root, 0, -0.05, 0);
+    // Scale group: wide in X, drastically flattened in Z so the hip reads as
+    // a broad plate rather than a protruding cylinder front-to-back.
+    const pelvisGrp = grp(root, 0, -0.05, 0);
+    pelvisGrp.scale.set(1.18, 1.0, 0.48);
+    mk(new THREE.CylinderGeometry(0.178, 0.178, 0.16, 6), bodyMat, pelvisGrp);
 
     // ── SHARED GEOMETRY ────────────────────────────────────────────────────
-    const jCapGeo  = new THREE.SphereGeometry(0.062, 8, 8);  // elbow cap
-    const kCapGeo  = new THREE.SphereGeometry(0.072, 8, 8);  // knee cap
-    const uArmGeo  = new THREE.CylinderGeometry(0.055, 0.046, 0.44, 6);
-    const fArmGeo  = new THREE.CylinderGeometry(0.041, 0.035, 0.50, 6);
-    const palmGeo  = new THREE.BoxGeometry(0.090, 0.072, 0.090);
-    const fngGeo   = new THREE.CylinderGeometry(0.011, 0.008, 0.090, 4);
+    const jCapGeo  = new THREE.SphereGeometry(0.092, 8, 8);                 // elbow joint — thicker
+    const kCapGeo  = new THREE.SphereGeometry(0.078, 8, 8);                 // knee cap
+    const uArmGeo  = new THREE.CylinderGeometry(0.094, 0.080, 0.44, 6);    // much thicker upper arm
+    const fArmGeo  = new THREE.CylinderGeometry(0.076, 0.064, 0.50, 6);    // much thicker forearm
+    const palmGeo  = new THREE.BoxGeometry(0.156, 0.096, 0.126);            // wide, realistic palm
+    const fngGeo   = new THREE.CylinderGeometry(0.018, 0.014, 0.108, 4);   // proper finger
+    const thmGeo   = new THREE.CylinderGeometry(0.022, 0.017, 0.082, 4);   // thumb
     const thighGeo = new THREE.CylinderGeometry(0.086, 0.072, 0.54, 6);
-    const shinGeo  = new THREE.CylinderGeometry(0.062, 0.083, 0.46, 6);  // reverse taper
+    const shinGeo  = new THREE.CylinderGeometry(0.062, 0.083, 0.46, 6);    // reverse taper
     const footGeo  = new THREE.BoxGeometry(0.22, 0.073, 0.29);
 
     // ── ARM SETUP ──────────────────────────────────────────────────────────
@@ -774,29 +841,38 @@ class EntityView {
     //          └─ elbow cap sphere
     //          └─ forearm mesh  (local: y = -0.25)
     //          └─ wrist pivot   (local: y = -0.50)
-    //               └─ palm + 3 fingers
+    //               └─ palm + 4 fingers + thumb
     //
     // rotation.z = side * UA_TILT gives the A-pose outward lean.
     // rotation.x is driven by _animateDeadStar() every frame.
+    // side: -1 = left arm, +1 = right arm (controls thumb radial offset).
 
     const UA_TILT = Math.PI / 9;  // 20° A-pose outward spread
 
-    const setupArm = (sh) => {
+    const setupArm = (sh, side) => {
       mk(uArmGeo, bodyMat,  sh, 0, -0.22, 0);
       const elbow = grp(sh, 0, -0.44, 0);
       mk(jCapGeo,  jointMat, elbow);
       mk(fArmGeo,  bodyMat,  elbow, 0, -0.25, 0);
       const wrist = grp(elbow, 0, -0.50, 0);
-      mk(palmGeo, acntMat, wrist, 0, -0.036, 0);
-      for (let f = -1; f <= 1; f++) mk(fngGeo, acntMat, wrist, f * 0.023, -0.126, 0);
+      mk(palmGeo, acntMat, wrist, 0, -0.048, 0);
+      // 4 fingers: index, middle, ring, pinky — evenly spaced across palm width
+      const fingerX = [-0.055, -0.018, 0.018, 0.055];
+      for (const fx of fingerX) mk(fngGeo, acntMat, wrist, fx, -0.140, 0.006);
+      // Thumb — angled outward on the radial side of the palm.
+      // side * -0.072 puts it on the inner edge of each hand (correct anatomy).
+      const tPivot = grp(wrist, side * -0.072, -0.054, 0.018);
+      tPivot.rotation.z = side * 0.56;   // spread outward from palm
+      tPivot.rotation.x = 0.18;          // slight forward lean
+      mk(thmGeo, acntMat, tPivot, 0, -0.041, 0);
     };
 
     const leftShoulder  = grp(root, -0.32, 0.58, 0);
     const rightShoulder = grp(root,  0.32, 0.58, 0);
     leftShoulder.rotation.z  = -UA_TILT;
     rightShoulder.rotation.z =  UA_TILT;
-    setupArm(leftShoulder);
-    setupArm(rightShoulder);
+    setupArm(leftShoulder,  -1);
+    setupArm(rightShoulder,  1);
 
     // ── LEG SETUP ──────────────────────────────────────────────────────────
     // Two-bone chain rooted at a hip pivot Group.
@@ -826,7 +902,9 @@ class EntityView {
 
     // ── JOINT REFS ─────────────────────────────────────────────────────────
     // Stored on the root Group so _animateDeadStar() can drive them each frame.
-    root._joints = { leftShoulder, rightShoulder, leftHip, rightHip, leftKnee, rightKnee };
+    // head: the full head Group — spun slowly for the dead-star tumble effect.
+    // chest / root: exposed for the external Animator (local player only).
+    root._joints = { root, chest: chestGrp, leftShoulder, rightShoulder, leftHip, rightHip, leftKnee, rightKnee, head: headGrp };
 
     return root;
   }
@@ -848,7 +926,7 @@ class EntityView {
     this.mesh.position.set(position.x, position.y + yOff, position.z);
     this.mesh.rotation.y = rotationY;
 
-    if (this.mesh._joints) this._animateDeadStar();
+    if (this.mesh._joints && !this._externalAnimator) this._animateDeadStar();
   }
 
   _animateDeadStar() {
@@ -872,6 +950,12 @@ class EntityView {
 
     j.leftShoulder.rotation.x  = -cycle * armAmp;
     j.rightShoulder.rotation.x =  cycle * armAmp;
+
+    // Dead Star head — slow axial spin with a gentle precession wobble.
+    // Y-rotation sweeps the equatorial rays; the sin on X gives the tumbling
+    // "dying pulsar" feel.  Both are cheap trig calls — fine for 8+ players.
+    j.head.rotation.y = (j.head.rotation.y + dt * 0.78) % (Math.PI * 2);
+    j.head.rotation.x = Math.sin(now * 0.29) * 0.14;
   }
 
   dispose(scene) {
@@ -1068,12 +1152,16 @@ class Predictor {
   /**
    * Runs one fixed simulation step locally and returns the input command
    * that should be sent to the server.
+   *
+   * cfgOverride lets PlayerController supply phase-specific acceleration /
+   * friction / turn-rate multipliers during forward prediction without
+   * touching reconciliation (which always replays with the flat server cfg).
    */
-  step(dirX, dirZ, dt) {
+  step(dirX, dirZ, dt, cfgOverride = null) {
     this.seqCounter++;
     const input = { seq: this.seqCounter, dirX, dirZ };
 
-    MovementSystem.step(this.state, input, dt, this.cfg);
+    MovementSystem.step(this.state, input, dt, cfgOverride ?? this.cfg);
 
     this.pendingInputs.push(input);
     this.history.push({ seq: input.seq, position: { ...this.state.position } });
@@ -1146,7 +1234,11 @@ class DebugUI {
   }
 
   update(stats) {
+    const sign  = stats.accel >= 0 ? '+' : '';
+    const loco  = stats.locoState  ? `\n── Locomotion ────────────────\nphase:   ${stats.locoState}\nspeed:   ${(stats.speed || 0).toFixed(2)} m/s (${Math.round((stats.normSpeed || 0) * 100)}%)\naccel:   ${sign}${(stats.accel || 0).toFixed(1)} m/s²\n` : '';
+    const anim  = stats.animState  ? `\n── Animation ─────────────────\nstate:   ${stats.animState} (${stats.animBlend}%)\nprev:    ${stats.animPrev || '--'}\n` : '';
     this.element.textContent =
+      `── Network ───────────────────\n` +
       `Gateway:   ${stats.gatewayStatus}\n` +
       `Server:    ${stats.serverId || '--'}\n` +
       `World:     ${stats.worldId || '--'}${stats.worldType ? ' (' + stats.worldType + ')' : ''}\n` +
@@ -1154,10 +1246,11 @@ class DebugUI {
       `Entities:  ${stats.entityCount}\n` +
       `Ping:      ${stats.ping.toFixed(0)} ms\n` +
       `TPS:       ${stats.tps ? stats.tps.toFixed(0) : '--'}\n` +
-      `\n` +
-      `fps:         ${stats.fps.toFixed(0)}\n` +
-      `server tick: ${stats.tick}\n` +
-      `correction:  ${stats.correction.toFixed(3)} m`;
+      `\n── Render ────────────────────\n` +
+      `fps:       ${stats.fps.toFixed(0)}\n` +
+      `tick:      ${stats.tick}\n` +
+      `net corr:  ${stats.correction.toFixed(3)} m` +
+      loco + anim;
   }
 }
 
@@ -1235,6 +1328,8 @@ class Game {
     this.entityManager = new ClientEntityManager(this.scene);
     this.interpolator = new Interpolator();
     this.predictor = null; // created once we know our spawn, in onWelcome
+    /** @type {PlayerController|null} Created alongside predictor in _handleWelcome. */
+    this.playerController = null;
 
     this.localId = null;
     this.lastSnapshotTick = 0;
@@ -1439,6 +1534,7 @@ class Game {
     }
     this.interpolator = new Interpolator();
     this.predictor = null;
+    this.playerController = null;
     this.lastSnapshotTick = 0;
     this.connectedPlayerCount = 0;
     this.entityCount = 0;
@@ -1472,6 +1568,16 @@ class Game {
       this.predictor.setSpawn(localEntity.position, localEntity.rotationY);
     }
     this.entityManager.ensureView(this.localId, 'player');
+
+    // Create PlayerController now that we have a predictor and a live mesh.
+    // attachMesh() sets _externalAnimator on the view so _animateDeadStar
+    // is suppressed — the Animator takes over joint writes for this player.
+    this.playerController = new PlayerController(this.predictor, MovementConfig);
+    const localView = this.entityManager.getView(this.localId);
+    if (localView?.mesh?._joints) {
+      this.playerController.attachMesh(localView.mesh);
+      localView._externalAnimator = true;
+    }
 
     this.statusEl.textContent = `connected (${this.localId.slice(0, 8)}) — ${this.worldId}`;
     this._setStage('IN_WORLD');
@@ -1538,12 +1644,21 @@ class Game {
 
     // ---- Local player: visual smoothing + camera --------------------------
     if (this.predictor) {
-      this.predictor.updateVisual(frameDt);
+      // Visual smoothing: ease rendered position toward simulated position.
+      if (this.playerController) this.playerController.updateVisual(frameDt);
+      else this.predictor.updateVisual(frameDt);
+
       const localView = this.entityManager.getView(this.localId);
       if (localView) {
         localView.updateTransform(this.predictor.visualPosition, this.predictor.state.rotationY);
       }
-      this.cameraController.update(this.predictor.visualPosition);
+
+      // Drive joint animations for the local player.
+      if (this.playerController) this.playerController.animate(frameDt);
+
+      // Camera follow with velocity anticipation (shifts look-at ahead of movement).
+      const vel = this.playerController ? this.predictor.state.velocity : null;
+      this.cameraController.update(this.predictor.visualPosition, vel);
     }
 
     // ---- Remote players: snapshot interpolation ----------------------------
@@ -1563,7 +1678,12 @@ class Game {
   _tickSimulation(dt) {
     if (!this.predictor) return;
     const direction = this.input.getMoveDirection(this.camera);
-    const input = this.predictor.step(direction.x, direction.z, dt);
+    // PlayerController.tick() classifies locomotion phase, builds a
+    // phase-appropriate movement config, then forwards to predictor.step().
+    // Falls back to raw predictor.step() if controller isn't ready yet.
+    const input = this.playerController
+      ? this.playerController.tick(direction.x, direction.z, dt)
+      : this.predictor.step(direction.x, direction.z, dt);
     this.network.sendInput(input);
   }
 
@@ -1576,6 +1696,7 @@ class Game {
       this._fpsTimer = 0;
     }
 
+    const locoStats = this.playerController ? this.playerController.debugStats() : {};
     this.debugUI.update({
       gatewayStatus: this.gatewayStatus,
       serverId: this.serverId,
@@ -1589,6 +1710,14 @@ class Game {
       tick: this.lastSnapshotTick,
       fps: this._fps,
       correction: this.predictor ? this.predictor.lastCorrectionAmount : 0,
+      // Locomotion + animation stats (undefined when controller not yet ready)
+      speed:     locoStats.speed,
+      normSpeed: locoStats.normSpeed,
+      accel:     locoStats.accel,
+      locoState: locoStats.locoDebug,
+      animState: locoStats.animState,
+      animBlend: locoStats.animBlend,
+      animPrev:  locoStats.animPrev,
     });
   }
 }
