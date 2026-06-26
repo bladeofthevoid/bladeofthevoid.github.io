@@ -54,7 +54,7 @@ const path = require('path');
 const Config = require('../config/constants');
 const MessageTypes = require('../network/MessageTypes');
 const GameWebSocketServer = require('../network/WebSocketServer');
-const { serveIndexIfRoot } = require('../shared/staticServer');
+const { serveStatic } = require('../shared/staticServer');
 const { postJson, readJsonBody, sendJson } = require('../shared/httpJson');
 
 const WorldManager = require('./WorldManager');
@@ -67,6 +67,7 @@ const PUBLIC_HOST = process.env.PUBLIC_HOST || 'localhost';
 const GATEWAY_URL = process.env.GATEWAY_URL || Config.GATEWAY.URL;
 
 const INDEX_HTML_PATH = path.join(__dirname, '..', 'index.html');
+const STATIC_ROOT     = path.dirname(INDEX_HTML_PATH);
 
 /**
  * The base URL this instance advertises to the gateway (as its admin API
@@ -119,7 +120,7 @@ const connectionWorld = new Map();
 // pure bookkeeping, the same operations WorldManager already exposes.
 // -------------------------------------------------------------------------
 const httpServer = http.createServer(async (req, res) => {
-  if (serveIndexIfRoot(req, res, INDEX_HTML_PATH)) return;
+  if (serveStatic(req, res, STATIC_ROOT)) return;
 
   if (req.method === 'GET' && req.url === '/admin/status') {
     sendJson(res, 200, worldManager.serializeStatus());
