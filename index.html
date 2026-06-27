@@ -759,11 +759,26 @@ class EntityView {
       return g;
     };
 
+    // ── BODY LEAN PIVOT ────────────────────────────────────────────────────
+    // WHY THIS GROUP EXISTS:
+    //   root.rotation.y is set each frame by updateTransform() to face the
+    //   movement direction.  If we write a forward lean to root.rotation.x,
+    //   Three.js Euler (XYZ order) computes: Rx(lean) * Ry(facing).
+    //   The X-tilt happens in WORLD space — when the character faces east the
+    //   lean points north (sideways).  This is the "lateral lean" bug.
+    //
+    //   bodyGrp is a child of root, so its local axes are already rotated by
+    //   root.rotation.y.  bodyGrp.rotation.x therefore rotates around the
+    //   character's own left-right axis → correct forward lean at any facing.
+    //
+    // Legs and pelvis stay as direct children of root; they should NOT lean.
+    const bodyGrp = grp(root, 0, 0, 0);
+
     // ── HEAD — "Dead Star" ──────────────────────────────────────────────────
     // Entire head lives in a Group so _animateDeadStar() can spin + wobble it
     // without touching any other body part.  Raised to y = 0.98 to clear the
     // neck with the larger shell radius.
-    const headGrp = grp(root, 0, 0.98, 0);
+    const headGrp = grp(bodyGrp, 0, 0.98, 0);
 
     mk(new THREE.SphereGeometry(0.148, 10, 10), coreMat,  headGrp);  // bright inner core
     mk(new THREE.SphereGeometry(0.210,  8,  8), glowMat,  headGrp);  // additive glow halo
@@ -791,13 +806,13 @@ class EntityView {
 
     // ── NECK ───────────────────────────────────────────────────────────────
     // Bottom (y = 0.66) sits flush on the chest top; top embeds in head sphere.
-    mk(new THREE.CylinderGeometry(0.054, 0.060, 0.14, 6), bodyMat, root, 0, 0.73, 0);
+    mk(new THREE.CylinderGeometry(0.054, 0.060, 0.14, 6), bodyMat, bodyGrp, 0, 0.73, 0);
 
     // ── CHEST ──────────────────────────────────────────────────────────────
     // CylinderGeometry(6 segments) = hexagonal prism per the brief.
     // Scaling the group wider in X and shallower in Z turns the tube into a
     // chest-plate: the single most important change for a humanoid silhouette.
-    const chestGrp = grp(root, 0, 0.45, 0);
+    const chestGrp = grp(bodyGrp, 0, 0.45, 0);
     chestGrp.scale.set(1.3, 1.0, 0.72);
     const chestGeo = new THREE.CylinderGeometry(0.24, 0.18, 0.42, 6);
     mk(chestGeo, bodyMat, chestGrp);
@@ -806,16 +821,18 @@ class EntityView {
     // ── SHOULDER CAPS ──────────────────────────────────────────────────────
     // Larger to match the thicker upper arms.
     const sbGeo = new THREE.SphereGeometry(0.096, 8, 8);
-    mk(sbGeo, jointMat, root, -0.32, 0.60, 0);
-    mk(sbGeo, jointMat, root,  0.32, 0.60, 0);
+    mk(sbGeo, jointMat, bodyGrp, -0.32, 0.60, 0);
+    mk(sbGeo, jointMat, bodyGrp,  0.32, 0.60, 0);
 
     // ── ABDOMEN ────────────────────────────────────────────────────────────
     // Short, narrow connector — creates the waist cinch between chest and hips.
-    mk(new THREE.CylinderGeometry(0.120, 0.132, 0.16, 6), bodyMat, root, 0, 0.13, 0);
+    mk(new THREE.CylinderGeometry(0.120, 0.132, 0.16, 6), bodyMat, bodyGrp, 0, 0.13, 0);
 
     // ── PELVIS ─────────────────────────────────────────────────────────────
     // Scale group: wide in X, drastically flattened in Z so the hip reads as
     // a broad plate rather than a protruding cylinder front-to-back.
+    // Stays in root — the pelvis is the pivot point of the lean, so it
+    // should NOT move when bodyGrp tilts.
     const pelvisGrp = grp(root, 0, -0.05, 0);
     pelvisGrp.scale.set(1.18, 1.0, 0.48);
     mk(new THREE.CylinderGeometry(0.178, 0.178, 0.16, 6), bodyMat, pelvisGrp);
@@ -833,20 +850,7 @@ class EntityView {
     const footGeo  = new THREE.BoxGeometry(0.22, 0.073, 0.29);
 
     // ── ARM SETUP ──────────────────────────────────────────────────────────
-    // Two-bone chain rooted at a shoulder pivot Group.
-    //
-    //   shoulder pivot   (world: ±0.32, 0.58)
-    //     └─ upper arm mesh    (local: y = -0.22)
-    //     └─ elbow pivot       (local: y = -0.44)  ← animation target
-    //          └─ elbow cap sphere
-    //          └─ forearm mesh  (local: y = -0.25)
-    //          └─ wrist pivot   (local: y = -0.50)
-    //               └─ palm + 4 fingers + thumb
-    //
-    // rotation.z = side * UA_TILT gives the A-pose outward lean.
-    // rotation.x is driven by _animateDeadStar() every frame.
-    // side: -1 = left arm, +1 = right arm (controls thumb radial offset).
-
+    // Shoulder pivots are children of bodyGrp so they lean with the torso.
     const UA_TILT = Math.PI / 9;  // 20° A-pose outward spread
 
     const setupArm = (sh, side) => {
@@ -860,32 +864,21 @@ class EntityView {
       const fingerX = [-0.055, -0.018, 0.018, 0.055];
       for (const fx of fingerX) mk(fngGeo, acntMat, wrist, fx, -0.140, 0.006);
       // Thumb — angled outward on the radial side of the palm.
-      // side * -0.072 puts it on the inner edge of each hand (correct anatomy).
       const tPivot = grp(wrist, side * -0.072, -0.054, 0.018);
-      tPivot.rotation.z = side * 0.56;   // spread outward from palm
-      tPivot.rotation.x = 0.18;          // slight forward lean
+      tPivot.rotation.z = side * 0.56;
+      tPivot.rotation.x = 0.18;
       mk(thmGeo, acntMat, tPivot, 0, -0.041, 0);
     };
 
-    const leftShoulder  = grp(root, -0.32, 0.58, 0);
-    const rightShoulder = grp(root,  0.32, 0.58, 0);
+    const leftShoulder  = grp(bodyGrp, -0.32, 0.58, 0);
+    const rightShoulder = grp(bodyGrp,  0.32, 0.58, 0);
     leftShoulder.rotation.z  = -UA_TILT;
     rightShoulder.rotation.z =  UA_TILT;
     setupArm(leftShoulder,  -1);
     setupArm(rightShoulder,  1);
 
     // ── LEG SETUP ──────────────────────────────────────────────────────────
-    // Two-bone chain rooted at a hip pivot Group.
-    //
-    //   hip pivot        (world: ±0.12, -0.13)
-    //     └─ thigh mesh       (local: y = -0.27)
-    //     └─ knee pivot       (local: y = -0.54)  ← animation target
-    //          └─ kneecap sphere
-    //          └─ shin mesh   (local: y = -0.23, reverse taper)
-    //          └─ foot mesh   (local: y = -0.497, z = +0.07 forward)
-    //
-    // rotation.x on hip drives leg swing; rotation.x on knee drives bend.
-
+    // Hip pivots stay in root — legs do not lean with the torso.
     const setupLeg = (hp) => {
       mk(thighGeo, bodyMat, hp, 0, -0.27, 0);
       const knee = grp(hp, 0, -0.54, 0);
@@ -901,10 +894,9 @@ class EntityView {
     const rightKnee = setupLeg(rightHip);
 
     // ── JOINT REFS ─────────────────────────────────────────────────────────
-    // Stored on the root Group so _animateDeadStar() can drive them each frame.
-    // head: the full head Group — spun slowly for the dead-star tumble effect.
-    // chest / root: exposed for the external Animator (local player only).
-    root._joints = { root, chest: chestGrp, leftShoulder, rightShoulder, leftHip, rightHip, leftKnee, rightKnee, head: headGrp };
+    // body: the lean pivot — Animator writes rotation.x/z here, not to root.
+    // chest: exposed so Animator can pulse Y-scale for breathing / bounce.
+    root._joints = { root, body: bodyGrp, chest: chestGrp, leftShoulder, rightShoulder, leftHip, rightHip, leftKnee, rightKnee, head: headGrp };
 
     return root;
   }
