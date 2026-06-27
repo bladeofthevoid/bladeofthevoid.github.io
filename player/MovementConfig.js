@@ -124,17 +124,47 @@ export const AnimConfig = Object.freeze({
   IDLE_HEAD_AMP:       0.055,  // head rotation.x amplitude
   IDLE_SHOULDER_DROP:  0.020,  // passive shoulder settlement (rotation.x)
 
-  // ── Walk-cycle step frequencies (cycles / second) ──────────────────────
-  // Lower = longer, more deliberate strides. The cycle is also scaled
-  // by normalised speed in Animator so slow movement never looks like
-  // marching in place — these are the FULL-SPEED frequencies.
+  // ── Walk-cycle stride lengths (metres per full gait cycle) ────────────
   //
-  //   Drift:       ~1 stride per 0.53 s  — measured repositioning steps
-  //   Run:         ~1 stride per 0.43 s  — long deliberate running
-  //   Breakstride: ~1 stride per 0.67 s  — massive, lunging power strides
-  STEP_HZ_DRIFT:       1.90,
-  STEP_HZ_RUN:         2.30,
-  STEP_HZ_BREAKSTRIDE: 1.50,
+  // WHY STRIDE LENGTH INSTEAD OF HZ:
+  //   A time-based (Hz) cycle advances the animation at the same rate
+  //   regardless of actual speed — the feet visually travel faster than
+  //   the body, producing a "skating" or "gliding" look.
+  //
+  //   A distance-based cycle advances by (speed × dt / strideLength) × 2π,
+  //   so the phase is locked to ground displacement.  One full cycle always
+  //   covers exactly strideLength metres.  At speed = 0 the phase freezes.
+  //
+  // TUNING:
+  //   strideLength ≈ 2 × sin(legAmp) × legLength  for a planted feel.
+  //   Go shorter for a quicker, lighter-footed style.
+  //   Go longer for a heavier, more deliberate stride.
+  //
+  // At MAX_SPEED = 6 m/s the effective Hz for each phase is:
+  //   drift:       6 / 0.90 = 6.7 Hz  (quick, many small steps)
+  //   run:         6 / 1.70 = 3.5 Hz  (deliberate long strides)
+  //   breakstride: 6 / 2.20 = 2.7 Hz  (massive, ground-eating strides)
+  STRIDE_LENGTH_DRIFT:       0.90,   // shorter than visual arc → light, quick repositioning
+  STRIDE_LENGTH_RUN:         1.70,   // closely matched to visual arc → planted, deliberate
+  STRIDE_LENGTH_BREAKSTRIDE: 2.20,   // matched to max visual arc → each stride feels committed
+
+  // ── BREAKSTRIDE SPEED NOTE ─────────────────────────────────────────────
+  // Breakstride is NOT faster than run at the physics level.
+  // The server's MovementSystem caps velocity at MAX_SPEED regardless of
+  // phase.  Adding a client-side maxSpeedMult causes permanent reconciliation
+  // oscillation (~3–5 cm snap at 20 Hz) because the server always corrects
+  // back to its own MAX_SPEED.
+  //
+  // To make breakstride physically faster, the server must also know about
+  // phases (send phase in the input packet; server uses phase-specific
+  // MAX_SPEED).  That is a server architecture change, not a client config.
+  //
+  // Breakstride's distinct feel comes from:
+  //   - dramatically larger strides (LEG_AMP_BREAKSTRIDE = 1.55 rad)
+  //   - heavier torso lean (TORSO_LEAN_BREAK = 0.300 rad ≈ 17°)
+  //   - more arm swing (ARM_AMP_RATIO × leg = ~0.93 rad per shoulder)
+  //   - lower friction (frictionMult = 0.78) — momentum carries longer
+  //   - slower cycle (STRIDE_LENGTH_BREAKSTRIDE) — each stride is an event
 
   // ── Limb swing amplitudes (radians) ────────────────────────────────────
   // Significantly larger than before. Combined with the lower frequencies
