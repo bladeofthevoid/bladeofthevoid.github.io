@@ -43,15 +43,17 @@ export const LocomotionPhase = Object.freeze({
  * LocomotionController reads these; nothing else should.
  */
 export const PhaseThresholds = Object.freeze({
-  // Below this the character reads as idle even with a tiny velocity
+  // Below this the character reads as idle even with a tiny residual velocity.
   IDLE_MAX:   0.05,
-  // Drift:       0 %  → DRIFT_MAX
-  DRIFT_MAX:  0.45,
-  // Run:         DRIFT_MAX → RUN_MAX
-  // Raised to 0.86 so you must be at 86 % of max speed — not just
-  // crossing the threshold, but genuinely committed to full running.
-  RUN_MAX:    0.86,
-  // Breakstride: RUN_MAX → 100 %  (no upper threshold — it's the top band)
+
+  // Phase boundaries expressed as fractions of MAX_SPEED (= BREAKSTRIDE_SPEED = 9.0):
+  //   DRIFT_MAX  = DRIFT_SPEED  / MAX_SPEED = 3.5 / 9.0 ≈ 0.389 → 0.40
+  //   RUN_MAX    = RUN_SPEED    / MAX_SPEED = 6.0 / 9.0 ≈ 0.667 → 0.67
+  //
+  // These match the server's phase speed caps so the locomotion phase always
+  // reflects the actual physics phase — not an approximation of it.
+  DRIFT_MAX:  0.40,
+  RUN_MAX:    0.67,
 });
 
 /**
@@ -148,23 +150,11 @@ export const AnimConfig = Object.freeze({
   STRIDE_LENGTH_RUN:         1.70,   // closely matched to visual arc → planted, deliberate
   STRIDE_LENGTH_BREAKSTRIDE: 2.20,   // matched to max visual arc → each stride feels committed
 
-  // ── BREAKSTRIDE SPEED NOTE ─────────────────────────────────────────────
-  // Breakstride is NOT faster than run at the physics level.
-  // The server's MovementSystem caps velocity at MAX_SPEED regardless of
-  // phase.  Adding a client-side maxSpeedMult causes permanent reconciliation
-  // oscillation (~3–5 cm snap at 20 Hz) because the server always corrects
-  // back to its own MAX_SPEED.
-  //
-  // To make breakstride physically faster, the server must also know about
-  // phases (send phase in the input packet; server uses phase-specific
-  // MAX_SPEED).  That is a server architecture change, not a client config.
-  //
-  // Breakstride's distinct feel comes from:
-  //   - dramatically larger strides (LEG_AMP_BREAKSTRIDE = 1.55 rad)
-  //   - heavier torso lean (TORSO_LEAN_BREAK = 0.300 rad ≈ 17°)
-  //   - more arm swing (ARM_AMP_RATIO × leg = ~0.93 rad per shoulder)
-  //   - lower friction (frictionMult = 0.78) — momentum carries longer
-  //   - slower cycle (STRIDE_LENGTH_BREAKSTRIDE) — each stride is an event
+  // ── BREAKSTRIDE SPEED ──────────────────────────────────────────────────
+  // Breakstride IS faster than run.  The server reads input.phase and caps
+  // velocity at BREAKSTRIDE_SPEED (9.0 m/s) — 50% faster than RUN_SPEED.
+  // The client's Predictor stores phase in every pending input so
+  // reconciliation replays are phase-aware too → zero divergence.
 
   // ── Limb swing amplitudes (radians) ────────────────────────────────────
   // Significantly larger than before. Combined with the lower frequencies
