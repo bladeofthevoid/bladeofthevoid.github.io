@@ -111,9 +111,14 @@ export class PlayerController {
     this.locomotion.update(this._prevSpeed, this.serverCfg.MAX_SPEED, hasInput, dt);
     this.phase = this.locomotion.phase;
 
-    // Build a phase-appropriate effective cfg and step prediction with it
+    // Build a phase-appropriate effective cfg and step prediction with it.
+    // phase is also passed directly so it lands in input.phase — the server
+    // reads this field to apply the matching speed cap server-side.
+    // Because reconciliation replays each pending input with its stored phase,
+    // client and server run byte-for-byte identical MovementSystem logic
+    // with zero speed divergence.
     const effectiveCfg = this._buildEffectiveCfg(this.phase);
-    const input        = this.predictor.step(dirX, dirZ, dt, effectiveCfg);
+    const input        = this.predictor.step(dirX, dirZ, dt, effectiveCfg, this.phase);
 
     // Update speed / accel measurements from post-step velocity
     const vx   = this.predictor.state.velocity.x;
@@ -184,7 +189,15 @@ export class PlayerController {
   _buildEffectiveCfg(phase) {
     const mult = PhaseConfig[phase] ?? PhaseConfig[LocomotionPhase.RUN];
     return {
-      MAX_SPEED:    this.serverCfg.MAX_SPEED,
+      // Hard cap and phase speed caps pass through unchanged — MovementSystem
+      // selects the right cap via input.phase, so we never override MAX_SPEED
+      // here (doing so would fight the server's authoritative cap).
+      MAX_SPEED:         this.serverCfg.MAX_SPEED,
+      DRIFT_SPEED:       this.serverCfg.DRIFT_SPEED,
+      RUN_SPEED:         this.serverCfg.RUN_SPEED,
+      BREAKSTRIDE_SPEED: this.serverCfg.BREAKSTRIDE_SPEED,
+      // These three are the only phase-specific multipliers left — they
+      // produce small, tolerable divergence from the server's flat values.
       ACCELERATION: this.serverCfg.ACCELERATION * mult.accelerationMult,
       FRICTION:     this.serverCfg.FRICTION      * mult.frictionMult,
       TURN_RATE:    this.serverCfg.TURN_RATE      * mult.turnRateMult,
