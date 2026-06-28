@@ -231,7 +231,14 @@ class World {
     const dirZ = clamp(Number(input.dirZ) || 0, -1, 1);
     const seq = Number.isFinite(input.seq) ? input.seq : player.lastProcessedInputSeq;
 
-    player.inputQueue.push({ dirX, dirZ, seq });
+    // Allowlist the locomotion phase string coming from the client.
+    // Only the three known values are forwarded; anything else (missing,
+    // null, unknown string) becomes undefined so MovementSystem falls
+    // back to RUN_SPEED — safe, conservative, and cheat-resistant.
+    const VALID_PHASES = new Set(['drift', 'run', 'breakstride']);
+    const phase = VALID_PHASES.has(input.phase) ? input.phase : undefined;
+
+    player.inputQueue.push({ dirX, dirZ, seq, phase });
 
     if (player.inputQueue.length > Config.LIMITS.MAX_QUEUED_INPUTS_PER_PLAYER) {
       player.inputQueue.shift();
