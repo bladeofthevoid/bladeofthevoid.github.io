@@ -47,8 +47,25 @@ class MovementSystem {
       const nx = dirX / len;
       const nz = dirZ / len;
 
-      const targetVX = nx * cfg.MAX_SPEED;
-      const targetVZ = nz * cfg.MAX_SPEED;
+      // Phase-based speed cap.
+      //
+      // The client sends `input.phase` ('drift' | 'run' | 'breakstride')
+      // so the server can enforce the correct top speed for each locomotion
+      // phase, making breakstride genuinely faster than run rather than just
+      // an animation distinction.
+      //
+      // Unknown / absent phase defaults to RUN_SPEED — a conservative cap
+      // that a legitimate client always exceeds only when explicitly in
+      // breakstride.  This also stops a cheating client gaining extra speed
+      // by simply omitting the phase field from its input packets.
+      const phaseSpeed = {
+        drift:       cfg.DRIFT_SPEED,
+        run:         cfg.RUN_SPEED,
+        breakstride: cfg.BREAKSTRIDE_SPEED,
+      }[input.phase] ?? (cfg.RUN_SPEED ?? cfg.MAX_SPEED);
+
+      const targetVX = nx * phaseSpeed;
+      const targetVZ = nz * phaseSpeed;
 
       state.velocity.x = MovementSystem._approach(state.velocity.x, targetVX, cfg.ACCELERATION * dt);
       state.velocity.z = MovementSystem._approach(state.velocity.z, targetVZ, cfg.ACCELERATION * dt);
